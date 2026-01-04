@@ -53,13 +53,13 @@ set(AUBIO_SRC
 add_library(aubio STATIC ${AUBIO_SRC})
 
 target_include_directories(aubio PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/spectral
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/onset
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/tempo
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/pitch
+        ${CMAKE_CURRENT_SOURCE_DIR}/aubio/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/aubio/src
         ${CMAKE_CURRENT_SOURCE_DIR}/aubio/src/utils
+        ${CMAKE_CURRENT_SOURCE_DIR}/aubio/src/spectral
+        ${CMAKE_CURRENT_SOURCE_DIR}/aubio/src/onset
+        ${CMAKE_CURRENT_SOURCE_DIR}/aubio/src/tempo
+        ${CMAKE_CURRENT_SOURCE_DIR}/aubio/src/pitch
 )
 
 # --------------------------
