@@ -69,13 +69,12 @@ target_include_directories(aubio PUBLIC
 )
 
 # -------------------------------------------------
-# 预编译头，解决 floorf/logf/strcmp 等未声明问题
+# 预编译头
 # -------------------------------------------------
 target_precompile_headers(aubio PRIVATE
         <stdlib.h>
         <math.h>
         <string.h>
-
 )
 
 # -------------------------------------------------
@@ -102,9 +101,17 @@ target_link_libraries(aubio_jni
 )
 
 # -------------------------------------------------
-# multi-ABI 配置
+# 针对 arm64-v8a 设置 16 KB 页大小（Google Play 兼容性要求）
 # -------------------------------------------------
-# 在 gradle 中配置 CMake 生成以下 ABI
+if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+    set_target_properties(aubio_jni PROPERTIES
+            LINK_FLAGS "-Wl,-z,max-page-size=0x4000"
+    )
+endif()
+
+# -------------------------------------------------
+# multi-ABI 支持说明
+# -------------------------------------------------
+# 在 gradle 中配置 abiFilters，例如：
 # abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64'
-# 这样 gradle 调用 CMake 会为每个 ABI 单独生成 .so
-# CMake 本身不需要额外改动，Android Studio + NDK 会处理
+# CMake 会为每个 ABI 单独生成 .so
