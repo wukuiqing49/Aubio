@@ -1,142 +1,149 @@
+#include <algorithm>  // 加上这一行
 #include <jni.h>
-#include <vector>
 #include <cmath>
 #include <cstring>
 #include "aubio.h"
-
-// 计算 RMS
-inline float computeRMS(float* data, int start, int end) {
-    float sum = 0;
-    for (int i = start; i < end; ++i) sum += data[i] * data[i];
-    return sqrtf(sum / (end - start));
-}
-
-// 自动选择 winSize（保证最小 512）
-inline uint_t autoWinSize(jsize pcmLen) {
-    if (pcmLen < 8000) return 512;
-    if (pcmLen < 20000) return 1024;
-    return 2048;
+// -------------------------------------------------
+// RMS 计算（安全版）
+// -------------------------------------------------
+static inline float computeRMS(const float* data, uint_t len) {
+    float sum = 0.f;
+    for (uint_t i = 0; i < len; ++i) sum += data[i] * data[i];
+    float rms = sqrtf(sum / len);
+    return std::isfinite(rms) ? rms : 0.f;
 }
 
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_wkq_aubio_AudioAnalyzer_nativeAnalyzeFrames(
         JNIEnv *env,
-        jobject thiz,
+        jobject /*thiz*/,
         jfloatArray pcmArray,
         jint sampleRate,
         jint winSize,
         jint hopSize,
         jobject callbackObj) {
 
+    if (!pcmArray || !callbackObj || sampleRate <= 0) return;
+
     jsize len = env->GetArrayLength(pcmArray);
-    if (len <= 0 || callbackObj == nullptr) return;
+    if (len <= 0) return;
+
+    // 参数兜底
+    if (winSize <= 0) winSize = 1024;
+    if (hopSize <= 0) hopSize = winSize / 2;
+    if (hopSize < 256) hopSize = 256;
 
     jfloat* pcmData = env->GetFloatArrayElements(pcmArray, nullptr);
+    if (!pcmData) return;
 
-    // 自动设置 winSize / hopSize
-    if (winSize <= 0) winSize = autoWinSize(len);
-    if (winSize < 512) winSize = 512;         // 最小窗口
-    if (hopSize <= 0) hopSize = winSize / 2;
-    if (hopSize < 256) hopSize = 256;        // 最小步长
+    // -------------------------------------------------
+    // Aubio 对象初始化
+    // -------------------------------------------------
+    fvec_t* in        = new_fvec(winSize);       // 注意：in 长度用 winSize
+    fvec_t* pitchOut  = new_fvec(1);
+    fvec_t* onsetOut  = new_fvec(1);
+    fvec_t* tempoOut  = new_fvec(1);
+    cvec_t* spectrum  = new_cvec(winSize);
 
-    // 初始化 Aubio 对象
-    fvec_t* in = new_fvec(winSize);
-    fvec_t* pitchOut = new_fvec(1);
-    cvec_t* spectrum = new_cvec(winSize);
-
-    aubio_fft_t* fftObj = new_aubio_fft(winSize);
     aubio_pitch_t* pitchObj = new_aubio_pitch("yin", winSize, hopSize, sampleRate);
     aubio_onset_t* onsetObj = new_aubio_onset("default", winSize, hopSize, sampleRate);
     aubio_tempo_t* tempoObj = new_aubio_tempo("default", winSize, hopSize, sampleRate);
+    aubio_fft_t*   fftObj   = new_aubio_fft(winSize);
 
-    if (!in || !pitchOut || !spectrum || !fftObj || !pitchObj || !onsetObj || !tempoObj) {
-        // 初始化失败直接释放
-        del_fvec(in); del_fvec(pitchOut); del_cvec(spectrum);
-        del_aubio_fft(fftObj); del_aubio_pitch(pitchObj);
-        del_aubio_onset(onsetObj); del_aubio_tempo(tempoObj);
-        env->ReleaseFloatArrayElements(pcmArray, pcmData, JNI_ABORT);
+    auto cleanup = [&]() {
+        if (in)        del_fvec(in);
+        if (pitchOut)  del_fvec(pitchOut);
+        if (onsetOut)  del_fvec(onsetOut);
+        if (tempoOut)  del_fvec(tempoOut);
+        if (spectrum)  del_cvec(spectrum);
+        if (pitchObj)  del_aubio_pitch(pitchObj);
+        if (onsetObj)  del_aubio_onset(onsetObj);
+        if (tempoObj)  del_aubio_tempo(tempoObj);
+        if (fftObj)    del_aubio_fft(fftObj);
+        if (pcmData)   env->ReleaseFloatArrayElements(pcmArray, pcmData, JNI_ABORT);
+    };
+
+    if (!in || !pitchOut || !onsetOut || !tempoOut ||
+        !spectrum || !pitchObj || !onsetObj || !tempoObj || !fftObj) {
+        cleanup();
         return;
     }
 
-    // 获取 Java 回调方法
+    // Java 回调
     jclass callbackClass = env->GetObjectClass(callbackObj);
-    jmethodID onFeatureFrame = env->GetMethodID(callbackClass, "onFeatureFrame",
-                                               "(FFFFFF)V");
-    jmethodID onComplete = env->GetMethodID(callbackClass, "onAnalysisComplete", "()V");
+    if (!callbackClass) { cleanup(); return; }
 
-    if (!onFeatureFrame || !onComplete) {
-        env->ReleaseFloatArrayElements(pcmArray, pcmData, JNI_ABORT);
-        return;
-    }
+    jmethodID onFeatureFrame = env->GetMethodID(
+            callbackClass,
+            "onFeatureFrame",
+            "(FFFFFF)V"
+    );
 
-    float lastOnsetTime = -1.0f;
+    jmethodID onComplete = env->GetMethodID(
+            callbackClass,
+            "onAnalysisComplete",
+            "()V"
+    );
 
-    // 循环分析窗口
-    for (int i = 0; i + 1 <= len; i += hopSize) {
-        int currentWin = winSize;
-        if (i + currentWin > len) {
-            // 短音频补零
-            currentWin = len - i;
-            std::memcpy(in->data, pcmData + i, sizeof(float) * currentWin);
-            // 补零
-            for (int j = currentWin; j < winSize; ++j) {
-                in->data[j] = 0.0f;
-            }
-        } else {
-            std::memcpy(in->data, pcmData + i, sizeof(float) * winSize);
-        }
+    if (!onFeatureFrame || !onComplete) { cleanup(); return; }
 
-        float timeSec = i / (float)sampleRate;
+    // -------------------------------------------------
+    // 主分析循环
+    // -------------------------------------------------
+    for (int i = 0; i < len; i += hopSize) {
+
+        int copyLen = std::min(hopSize, len - i);
+
+        // 清零整个窗口，保证 Aubio pitch 不出异常值
+        memset(in->data, 0, sizeof(float) * winSize);
+        memcpy(in->data, pcmData + i, sizeof(float) * copyLen);
+
+        float timeSec = (float)i / (float)sampleRate;
 
         // pitch
         aubio_pitch_do(pitchObj, in, pitchOut);
         float pitchHz = pitchOut->data[0];
 
         // onset
-        aubio_onset_do(onsetObj, in, nullptr);
-        float onsetLastTime = aubio_onset_get_last(onsetObj);
-        float onsetValue = (onsetLastTime > lastOnsetTime) ? 1.0f : 0.0f;
-        lastOnsetTime = onsetLastTime;
+        aubio_onset_do(onsetObj, in, onsetOut);
+        float onsetValue = onsetOut->data[0];
 
         // tempo
-        aubio_tempo_do(tempoObj, in, nullptr);
-        float bpm = aubio_tempo_get_bpm(tempoObj);
+        aubio_tempo_do(tempoObj, in, tempoOut);
+        float bpm = tempoOut->data[0];
 
         // FFT → spectral centroid
         aubio_fft_do(fftObj, in, spectrum);
-        float centroid = 0, sum = 0;
-        for (uint_t k = 0; k < spectrum->length; k++) {
+        float centroid = 0.f;
+        float sum = 0.f;
+        for (uint_t k = 0; k < spectrum->length; ++k) {
             centroid += k * spectrum->norm[k];
             sum += spectrum->norm[k];
         }
-        centroid = sum > 0 ? (centroid / sum) * (sampleRate / winSize) : 0;
+        centroid = (sum > 0.f) ? (centroid / sum) * ((float)sampleRate / winSize) : 0.f;
 
         // RMS
-        float rms = computeRMS(in->data, 0, winSize);
+        float rms = computeRMS(in->data, hopSize);
 
-        // 调用 Java 回调
-        env->CallVoidMethod(callbackObj, onFeatureFrame,
-                            timeSec, rms, centroid, pitchHz, onsetValue, bpm);
+        env->CallVoidMethod(
+                callbackObj,
+                onFeatureFrame,
+                timeSec,
+                rms,
+                centroid,
+                pitchHz,
+                onsetValue,
+                bpm
+        );
 
         if (env->ExceptionCheck()) {
-            env->ExceptionDescribe();
             env->ExceptionClear();
             break;
         }
     }
 
-    // 分析完成回调
     env->CallVoidMethod(callbackObj, onComplete);
 
-    // 释放资源
-    del_fvec(in);
-    del_fvec(pitchOut);
-    del_cvec(spectrum);
-    del_aubio_fft(fftObj);
-    del_aubio_pitch(pitchObj);
-    del_aubio_onset(onsetObj);
-    del_aubio_tempo(tempoObj);
-
-    env->ReleaseFloatArrayElements(pcmArray, pcmData, JNI_ABORT);
+    cleanup();
 }

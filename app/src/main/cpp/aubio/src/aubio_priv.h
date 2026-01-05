@@ -24,6 +24,11 @@
  * This file is for inclusion from _within_ the library only.
  */
 
+#include <stddef.h>   // NULL
+#include <stdlib.h>   // malloc, calloc, free
+#include <math.h>     // logf, floorf, sqrtf 等
+#include <string.h>   // strcmp, memcpy, memset 等
+
 #ifndef AUBIO_PRIV_H
 #define AUBIO_PRIV_H
 
